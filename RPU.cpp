@@ -22,7 +22,6 @@
  
 #include <Arduino.h>
 #include <EEPROM.h>
-//#define DEBUG_MESSAGES    1
 #define RPU_CPP_FILE
 #include "RPU_config.h"
 #include "RPU.h"
@@ -115,8 +114,11 @@ volatile byte SwitchesNow[NUM_SWITCH_BYTES];
 byte DipSwitches[4];
 #endif
 
-
+#if (RPU_OS_HARDWARE_REV>2)
 #define SOLENOID_STACK_SIZE 150
+#else 
+#define SOLENOID_STACK_SIZE 60
+#endif
 #define SOLENOID_STACK_EMPTY 0xFF
 volatile byte SolenoidStackFirst;
 volatile byte SolenoidStackLast;
@@ -2736,8 +2738,13 @@ void InterruptService3() {
     RPU_DataWrite(ADDRESS_U10_B_CONTROL, RPU_DataRead(ADDRESS_U10_B_CONTROL) | 0x08);
     RPU_DataWrite(ADDRESS_U10_B_CONTROL, RPU_DataRead(ADDRESS_U10_B_CONTROL) & 0xF7);
 
-    for (int lampByteCount=8; lampByteCount<RPU_NUM_LAMP_BANKS; lampByteCount++) {
+    // For the first four bits of lamps, we're going to look at LampStates[7] again
+    // and use those top 4 bits that we didn't use before. Then we're going
+    // to move on with bytes 8, 9, and 10 for the remaining 24 bits of data
+    byte auxBankNum = 0;
+    for (int lampByteCount=7; lampByteCount<RPU_NUM_LAMP_BANKS; lampByteCount++) {
       for (byte nibbleCount=0; nibbleCount<2; nibbleCount++) {
+        if (lampByteCount==7) nibbleCount = 1; // skip the first nibble of byte 7 because it belongs to primary lamps
         byte nibbleOffset = (nibbleCount)?1:16;
         byte lampOutput = (LampStates[lampByteCount] * nibbleOffset);
         // Every other time through the cycle, we OR in the dim variable
@@ -2747,7 +2754,7 @@ void InterruptService3() {
 
         // The data will be in the upper nibble, but we need the bank count in the lower
         lampOutput &= 0xF0;
-        lampOutput += ((lampByteCount-8)*2+nibbleOffset);
+        lampOutput += auxBankNum;
 
         interrupts();
         RPU_DataWrite(ADDRESS_U10_A, 0xFF);
@@ -2757,6 +2764,8 @@ void InterruptService3() {
         RPU_DataWrite(ADDRESS_U11_A_CONTROL, RPU_DataRead(ADDRESS_U11_A_CONTROL) | 0x08);
         RPU_DataWrite(ADDRESS_U11_A_CONTROL, RPU_DataRead(ADDRESS_U11_A_CONTROL) & 0xF7);    
         RPU_DataWrite(ADDRESS_U10_A, lampOutput);
+        
+        auxBankNum += 1;
       }
     }
 #endif    
@@ -2917,37 +2926,38 @@ unsigned long RPU_InitializeMPUArch1(unsigned long initOptions, byte creditReset
 
 #if (RPU_OS_HARDWARE_REV==1) or (RPU_OS_HARDWARE_REV==2)
   (void)creditResetSwitch;
+
+  if (initOptions&( RPU_CMD_BOOT_ORIGINAL | RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET | 
+                    RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED | RPU_CMD_AUTODETECT_ARCHITECTURE ) ) {
+    retResult |= RPU_RET_OPTION_NOT_SUPPORTED;
+  }
+  
   if (LookFor6800Activity()) {
     if (initOptions&RPU_CMD_INIT_AND_RETURN_EVEN_IF_ORIGINAL_CHOSEN) {
       retResult |= RPU_RET_ORIGINAL_CODE_REQUESTED;
+      return retResult;
     } else {
       while (1);
     }
   }
-  if (initOptions&( RPU_CMD_BOOT_ORIGINAL | RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_NEW_IF_CREDIT_RESET | 
-                    RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED | RPU_CMD_AUTODETECT_ARCHITECTURE ) ) {
-    retResult |= RPU_RET_OPTION_NOT_SUPPORTED;
-  }
 #elif (RPU_OS_HARDWARE_REV==3)
   (void)creditResetSwitch;
 
-  if (initOptions&( RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_NEW_IF_CREDIT_RESET | 
-                    RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED | RPU_CMD_AUTODETECT_ARCHITECTURE ) ) {
+  if (initOptions&( RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET | 
+                    RPU_CMD_AUTODETECT_ARCHITECTURE ) ) {
     retResult |= RPU_RET_OPTION_NOT_SUPPORTED;
   }
 
   pinMode(13, INPUT);
   boolean switchStateClosed = digitalRead(13) ? false : true;
   boolean bootToOriginal = false;
-  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) || 
+
+  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) ||
         (switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED)) ||
-        (!switchStateClosed && (initOptions&RPU_CMD_BOOT_NEW_IF_SWITCH_CLOSED)) ) {
+        (!switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_NOT_SWITCH_CLOSED)) ) {
     bootToOriginal = true;
   }
-  if ((initOptions & RPU_CMD_BOOT_NEW) || (switchStateClosed && (initOptions&RPU_CMD_BOOT_NEW_IF_SWITCH_CLOSED))) {
-    bootToOriginal = false;
-  }
-
+  
   if (bootToOriginal) {
     // Let the 680X run 
     pinMode(14, OUTPUT); // Halt
@@ -3003,7 +3013,7 @@ unsigned long RPU_InitializeMPUArch1(unsigned long initOptions, byte creditReset
   }
 
   boolean creditResetButtonHit = false;
-  if ( creditResetSwitch!=0xFF && (initOptions & (RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_NEW_IF_CREDIT_RESET))) {
+  if ( creditResetSwitch!=0xFF && (initOptions & (RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET))) {
     // We have to check the credit/reset button to honor the init request
     creditResetButtonHit = CheckCreditResetSwitchArch1(creditResetSwitch);
     if (creditResetButtonHit) {
@@ -3012,16 +3022,12 @@ unsigned long RPU_InitializeMPUArch1(unsigned long initOptions, byte creditReset
   }
 
   boolean bootToOriginal = false;
-  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) || 
+  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) ||
         (switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED)) ||
-        (!creditResetButtonHit && (initOptions&RPU_CMD_BOOT_NEW_IF_CREDIT_RESET)) ||
-        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET)) ) {
+        (!switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_NOT_SWITCH_CLOSED)) ||
+        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET)) ||
+        (!creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET)) ) {
     bootToOriginal = true;
-  }
-  if (  (initOptions & RPU_CMD_BOOT_NEW) || 
-        (switchStateClosed && (initOptions&RPU_CMD_BOOT_NEW_IF_SWITCH_CLOSED)) ||
-        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_NEW_IF_CREDIT_RESET)) ) {
-    bootToOriginal = false;
   }
 
   if (bootToOriginal) {
@@ -3442,7 +3448,7 @@ unsigned long RPU_InitializeMPUArch10(unsigned long initOptions, byte creditRese
   }
 
   boolean creditResetButtonHit = false;
-  if ( creditResetSwitch!=0xFF && (initOptions & (RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_NEW_IF_CREDIT_RESET))) {
+  if ( creditResetSwitch!=0xFF && (initOptions & (RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET | RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET))) {
     // We have to check the credit/reset button to honor the init request
     creditResetButtonHit = CheckCreditResetSwitchArch10(creditResetSwitch);
     if (creditResetButtonHit) {
@@ -3451,16 +3457,13 @@ unsigned long RPU_InitializeMPUArch10(unsigned long initOptions, byte creditRese
   }
 
   boolean bootToOriginal = false;
-  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) || 
-        (switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED)) ||
-        (!creditResetButtonHit && (initOptions&RPU_CMD_BOOT_NEW_IF_CREDIT_RESET)) ||
-        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET)) ) {
+
+  if (  (initOptions & RPU_CMD_BOOT_ORIGINAL) ||
+        (switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_SWITCH_CLOSED))  ||
+        (!switchStateClosed && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_NOT_SWITCH_CLOSED))  ||
+        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_CREDIT_RESET))  ||
+        (!creditResetButtonHit && (initOptions&RPU_CMD_BOOT_ORIGINAL_IF_NOT_CREDIT_RESET)) ) {
     bootToOriginal = true;
-  }
-  if (  (initOptions & RPU_CMD_BOOT_NEW) || 
-        (switchStateClosed && (initOptions&RPU_CMD_BOOT_NEW_IF_SWITCH_CLOSED)) ||
-        (creditResetButtonHit && (initOptions&RPU_CMD_BOOT_NEW_IF_CREDIT_RESET)) ) {
-    bootToOriginal = false;
   }
 
   if (bootToOriginal) {
