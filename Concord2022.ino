@@ -18,7 +18,7 @@
 
 
 #define CONCORD_2022_MAJOR_VERSION  2022
-#define CONCORD_2022_MINOR_VERSION  1
+#define CONCORD_2022_MINOR_VERSION  2
 #define DEBUG_MESSAGES  0
 
 /*********************************************************************
@@ -64,6 +64,7 @@ boolean MachineStateChanged = true;
 
 byte SelfTestStateToCalloutMap[] = {
   136, 137, 135, 134, 133, 140, 141, 142, 139, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, // <- SelfTestAndAudit modes
+  138, // reboot prompt
   // Starting concord specific modes
   153, 154, 155, 156, 157, 158, // Freeplay through Callouts volume
   209, 159, 160, 161, 162, 163, 164, 165, // through special award
